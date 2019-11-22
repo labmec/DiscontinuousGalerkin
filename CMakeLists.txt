@@ -12,5 +12,4 @@ find_package(PZ REQUIRED)
 
 
 add_subdirectory(Poisson2D)
-add_subdirectory(Laplacian2DpFEM)
 

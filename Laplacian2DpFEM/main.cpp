@@ -62,13 +62,15 @@ int main(int argc, char **argv)
     //Setting up the analysis object
     constexpr bool optimizeBandwidth{true};
     TPZAnalysis an(cMesh, optimizeBandwidth); //Creates the object that will manage the analysis of the problem
+    {
 #ifdef USING_MKL
-    TPZSymetricSpStructMatrix matskl(cMesh);
+        TPZSymetricSpStructMatrix matskl(cMesh);
 #else
-    TPZSkylineStructMatrix matskl(cMesh); // asymmetric case ***
+        TPZSkylineStructMatrix matskl(cMesh); // asymmetric case ***
 #endif
-    matskl.SetNumThreads(numthreads);
-    an.SetStructuralMatrix(matskl);
+        matskl.SetNumThreads(numthreads);
+        an.SetStructuralMatrix(matskl);
+    }
     TPZStepSolver<STATE> step;
     step.SetDirect(ELDLt);
     an.SetSolver(step);
@@ -77,6 +79,11 @@ int main(int argc, char **argv)
     auto exactSolution = [] (const TPZVec<REAL> &pt, TPZVec<STATE> &sol, TPZFMatrix<STATE> &solDx){
         const auto x = pt[0], y = pt[1];
         sol[0] = std::pow(10,-std::pow(-2*M_PI + 15*x,2) - std::pow(-2*M_PI + 15*y,2))*(-2*M_PI + 15*x);
+        solDx(0,0) = -3*std::pow(2,-8*std::pow(M_PI,2) + 60*M_PI*(x + y) - 225*(std::pow(x,2) + std::pow(y,2)))
+                *std::pow(5,1 - 8*std::pow(M_PI,2) + 60*M_PI*(x + y) - 225*(std::pow(x,2) + std::pow(y,2)))
+                *(-1 + 2*std::pow(2*M_PI - 15*x,2)*std::log(10));
+        solDx(1,0) = -3*std::pow(10,1 - 8*std::pow(M_PI,2) + 60*M_PI*(x + y) - 225*(std::pow(x,2) + std::pow(y,2)))
+                *(2*M_PI - 15*x)*(2*M_PI - 15*y)*std::log(10);
     };
     an.SetExact(exactSolution);
     an.SetThreadsForError(numthreads);
@@ -107,26 +114,33 @@ int main(int argc, char **argv)
         std::cout<<"\tPost processing finished."<<std::endl;
         if(it < nPRefinements - 1){
             an.PostProcessError(errorVec,true);
-            auto &allElementErrors = cMesh->ElementSolution();
+            TPZFMatrix<STATE> &allElementErrors = cMesh->ElementSolution();
             TPZManVector<std::pair<int,STATE>,nRefEls> biggestElementErrors(nRefEls,std::make_pair(-1,-1));
             for(int iel = 0 ; iel < nElems; iel++){
+                if(cMesh->Element(iel)->Reference() && cMesh->Element(iel)->Reference()->Dimension() != 2) continue;
                 int pos = 0;
-                while( biggestElementErrors[pos].second > allElementErrors(iel,0) ){
+                auto index = cMesh->Element(iel)->Index();
+                while( pos < nRefEls && biggestElementErrors[pos].second > allElementErrors(index,1) ){
                     pos++;
                 }
                 for(int iPos = pos; iPos < nRefEls - 1; iPos++){
                     biggestElementErrors[iPos + 1] = biggestElementErrors[iPos];
                 }
-                auto id = cMesh->Element(iel)->Index();
-                auto elError = allElementErrors(iel,0);
-                biggestElementErrors[pos] = std::make_pair(id,elError);
+                auto elError = allElementErrors(index,1);
+                if(pos < nRefEls)   biggestElementErrors[pos] = std::make_pair(index,elError);
             }
             for(int iel = 0 ; iel < nRefEls; iel++){
                 const auto elId = biggestElementErrors[iel].first;
                 auto refEl =  dynamic_cast<TPZCompElDisc *> (cMesh->Element(elId));
-                const int currentPorder = refEl->GetgOrder();
+                if(!refEl) continue;
+                const auto nCon = refEl->NConnects();
+                const int currentPorder = refEl->Connect(nCon-1).Order();
                 refEl->PRefine(currentPorder+1);
             }
+            cMesh->ComputeNodElCon();
+            cMesh->CleanUpUnconnectedNodes();
+            const auto neqNew = cMesh->NEquations();
+            an.StructMatrix()->EquationFilter().SetNumEq(neqNew);
         }
     }
 
